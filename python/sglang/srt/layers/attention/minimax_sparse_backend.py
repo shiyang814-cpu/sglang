@@ -419,6 +419,34 @@ class MiniMaxSparseAttnBackend(AttentionBackend):
             )
         return int(q_cap)
 
+    def _validate_uniform_target_verify_geometry(
+        self, forward_batch: ForwardBatch, q: torch.Tensor
+    ) -> tuple[int, int, int]:
+        bs = int(forward_batch.seq_lens.shape[0])
+        verify_len = self._target_verify_q_cap(forward_batch)
+        expected_num_tokens = bs * verify_len
+        global_num_token_non_padded_cpu = getattr(
+            forward_batch, "global_num_token_non_padded_cpu", None
+        )
+        if (
+            global_num_token_non_padded_cpu is not None
+            and int(global_num_token_non_padded_cpu) < expected_num_tokens
+        ):
+            raise RuntimeError(
+                "MiniMax sparse DP-padded TARGET_VERIFY requires per-request "
+                "geometry; refusing to treat padded graph rows as real tokens. "
+                "global_num_token_non_padded_cpu="
+                f"{global_num_token_non_padded_cpu}, expected={expected_num_tokens}."
+            )
+        if bs <= 0 or q.shape[0] != expected_num_tokens:
+            raise RuntimeError(
+                "MiniMax sparse non-ragged TARGET_VERIFY requires the fixed "
+                "verify width from spec_info; refusing to infer a layout from "
+                f"q.shape. Got q.shape[0]={q.shape[0]}, bs={bs}, "
+                f"verify_cap={verify_len}, expected={expected_num_tokens}."
+            )
+        return bs, verify_len, expected_num_tokens
+
     @staticmethod
     def _choose_decode_score_max_chunks(batch_size: int) -> int:
         """Score chunk count per graph bucket.
@@ -1533,31 +1561,9 @@ class MiniMaxSparseAttnBackend(AttentionBackend):
                 forward_batch, q
             )
         elif forward_batch.forward_mode.is_target_verify():
-            bs = int(forward_batch.seq_lens.shape[0])
-            verify_len = self._target_verify_q_cap(forward_batch)
-            expected_num_tokens = bs * verify_len
-            global_num_token_non_padded_cpu = getattr(
-                forward_batch, "global_num_token_non_padded_cpu", None
+            bs, verify_len, expected_num_tokens = (
+                self._validate_uniform_target_verify_geometry(forward_batch, q)
             )
-            if getattr(forward_batch, "attn_tp_sequence_sharded", False) or (
-                global_num_token_non_padded_cpu is not None
-                and int(global_num_token_non_padded_cpu) < expected_num_tokens
-            ):
-                raise RuntimeError(
-                    "MiniMax sparse DP-padded or sequence-sharded TARGET_VERIFY "
-                    "requires per-request geometry; refusing to treat graph rows "
-                    "as uniform real tokens. "
-                    "global_num_token_non_padded_cpu="
-                    f"{global_num_token_non_padded_cpu}, "
-                    f"expected={expected_num_tokens}."
-                )
-            if bs <= 0 or q.shape[0] != expected_num_tokens:
-                raise RuntimeError(
-                    "MiniMax sparse non-ragged TARGET_VERIFY requires the fixed "
-                    "verify width from spec_info; refusing to infer a layout from "
-                    f"q.shape. Got q.shape[0]={q.shape[0]}, bs={bs}, "
-                    f"verify_cap={verify_len}, expected={expected_num_tokens}."
-                )
             uniform_verify_lens = torch.full(
                 (bs,),
                 verify_len,
