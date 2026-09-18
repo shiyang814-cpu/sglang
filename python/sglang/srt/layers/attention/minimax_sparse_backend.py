@@ -1536,6 +1536,21 @@ class MiniMaxSparseAttnBackend(AttentionBackend):
             bs = int(forward_batch.seq_lens.shape[0])
             verify_len = self._target_verify_q_cap(forward_batch)
             expected_num_tokens = bs * verify_len
+            global_num_token_non_padded_cpu = getattr(
+                forward_batch, "global_num_token_non_padded_cpu", None
+            )
+            if getattr(forward_batch, "attn_tp_sequence_sharded", False) or (
+                global_num_token_non_padded_cpu is not None
+                and int(global_num_token_non_padded_cpu) < expected_num_tokens
+            ):
+                raise RuntimeError(
+                    "MiniMax sparse DP-padded or sequence-sharded TARGET_VERIFY "
+                    "requires per-request geometry; refusing to treat graph rows "
+                    "as uniform real tokens. "
+                    "global_num_token_non_padded_cpu="
+                    f"{global_num_token_non_padded_cpu}, "
+                    f"expected={expected_num_tokens}."
+                )
             if bs <= 0 or q.shape[0] != expected_num_tokens:
                 raise RuntimeError(
                     "MiniMax sparse non-ragged TARGET_VERIFY requires the fixed "
@@ -1926,6 +1941,9 @@ class MiniMaxHybridAttnBackend(AttentionBackend):
         self.sparse_layer_ids = sparse_layer_ids
         # Let the sparse decode reuse the dense paged backend (page table + workspace).
         self.sparse.dense_backend = dense_backend
+        self.extend_dummy_seqs_capped_by_req_pool = getattr(
+            dense_backend, "extend_dummy_seqs_capped_by_req_pool", False
+        ) or getattr(sparse_backend, "extend_dummy_seqs_capped_by_req_pool", False)
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         # delegate so the dense (FlashInfer) backend keeps its own eager init.
